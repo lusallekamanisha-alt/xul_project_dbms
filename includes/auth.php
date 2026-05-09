@@ -1,97 +1,155 @@
 <?php
 declare(strict_types=1);
 
-require_once __DIR__ . "/bootstrap.php";
-
-function get_users(): array
-{
-    if (!is_file(USERS_FILE)) {
-        return [];
-    }
-
-    $json = file_get_contents(USERS_FILE);
-    if ($json === false || trim($json) === "") {
-        return [];
-    }
-
-    $users = json_decode($json, true);
-    return is_array($users) ? $users : [];
-}
-
-function save_users(array $users): void
-{
-    $dir = dirname(USERS_FILE);
-    if (!is_dir($dir)) {
-        mkdir($dir, 0777, true);
-    }
-    file_put_contents(USERS_FILE, json_encode($users, JSON_PRETTY_PRINT));
-}
+require_once __DIR__ . '/bootstrap.php';
 
 function find_user(string $username): ?array
 {
-    foreach (get_users() as $user) {
-        if (($user["username"] ?? "") === $username) {
-            return $user;
-        }
-    }
-    return null;
+    $stmt = db()->prepare("
+        SELECT *
+        FROM users
+        WHERE username = :username
+        LIMIT 1
+    ");
+
+    $stmt->execute([
+        'username' => trim($username)
+    ]);
+
+    $user = $stmt->fetch();
+
+    return $user ?: null;
 }
 
-function register_user(string $username, string $email, string $password): ?string
-{
+function register_user(
+    string $username,
+    string $email,
+    string $password
+): ?string {
+
     $username = trim($username);
     $email = trim($email);
 
-    if ($username === "" || $email === "" || $password === "") {
-        return "All fields are required.";
-    }
-    if (find_user($username) !== null) {
-        return "Username already exists.";
+    if ($username === '' || $email === '' || $password === '') {
+        return 'All fields are required.';
     }
 
-    $users = get_users();
-    $users[] = [
-        "username" => $username,
-        "email" => $email,
-        "password_hash" => password_hash($password, PASSWORD_DEFAULT),
-    ];
-    save_users($users);
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        return 'Invalid email address.';
+    }
+
+    if (find_user($username)) {
+        return 'Username already exists.';
+    }
+
+    $stmt = db()->prepare("
+        SELECT id
+        FROM users
+        WHERE email = :email
+        LIMIT 1
+    ");
+
+    $stmt->execute([
+        'email' => $email
+    ]);
+
+    if ($stmt->fetch()) {
+        return 'Email already exists.';
+    }
+
+    $passwordHash = password_hash($password, PASSWORD_DEFAULT);
+
+    $stmt = db()->prepare("
+        INSERT INTO users (
+            username,
+            email,
+            password_hash
+        )
+        VALUES (
+            :username,
+            :email,
+            :password_hash
+        )
+    ");
+
+    $stmt->execute([
+        'username' => $username,
+        'email' => $email,
+        'password_hash' => $passwordHash
+    ]);
+
     return null;
 }
 
 function login_user(string $username, string $password): bool
 {
-    $user = find_user(trim($username));
-    if ($user === null) {
-        return false;
-    }
-    if (!password_verify($password, $user["password_hash"] ?? "")) {
+    $user = find_user($username);
+
+    if (!$user) {
         return false;
     }
 
-    $_SESSION["auth_user"] = $user["username"];
+    if (!password_verify($password, $user['password_hash'])) {
+        return false;
+    }
+
+    $_SESSION['auth_user_id'] = $user['id'];
+
     return true;
-}
-
-function logout_user(): void
-{
-    unset($_SESSION["auth_user"]);
 }
 
 function current_user(): ?array
 {
-    $username = $_SESSION["auth_user"] ?? null;
-    if (!is_string($username) || $username === "") {
+    $userId = $_SESSION['auth_user_id'] ?? null;
+
+    if (!$userId) {
         return null;
     }
-    return find_user($username);
+
+    $stmt = db()->prepare("
+        SELECT *
+        FROM users
+        WHERE id = :id
+        LIMIT 1
+    ");
+
+    $stmt->execute([
+        'id' => $userId
+    ]);
+
+    $user = $stmt->fetch();
+
+    return $user ?: null;
+}
+
+function logout_user(): void
+{
+    $_SESSION = [];
+
+    if (ini_get('session.use_cookies')) {
+
+        $params = session_get_cookie_params();
+
+        setcookie(
+            session_name(),
+            '',
+            time() - 42000,
+            $params['path'],
+            $params['domain'],
+            $params['secure'],
+            $params['httponly']
+        );
+    }
+
+    session_destroy();
 }
 
 function require_auth(): void
 {
-    if (current_user() !== null) {
+    if (current_user()) {
         return;
     }
-    header("Location: " . app_url("public/auth/login.php"));
+
+    header('Location: ' . app_url('public/auth/login.php'));
     exit;
 }
